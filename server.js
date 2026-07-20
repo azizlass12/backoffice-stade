@@ -92,6 +92,16 @@ io.on('connection', (socket) => {
         if (type === 'goal') {
           if (team === 'home') match.homeScore += 1;
           if (team === 'away') match.awayScore += 1;
+          
+          if (!match.playerRatings) {
+            match.playerRatings = { home: {}, away: {} };
+          }
+          if (!match.playerRatings[team]) {
+            match.playerRatings[team] = {};
+          }
+          const currentRating = match.playerRatings[team][player] || 0;
+          match.playerRatings[team][player] = currentRating + 1;
+          match.markModified('playerRatings');
         }
         await match.save();
         io.emit('matchUpdated', match);
