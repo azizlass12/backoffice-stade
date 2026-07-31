@@ -140,6 +140,7 @@ io.on('connection', (socket) => {
           match.elapsedMs += (now.getTime() - new Date(match.startTime).getTime());
         }
         match.status = 'FINISHED';
+        match.finishedAt = now;
         match.startTime = null;
 
         // Auto-calculate Man of the Match: score = playerRating + goalCount

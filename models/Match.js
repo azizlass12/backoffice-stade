@@ -17,6 +17,7 @@ const MatchSchema = new mongoose.Schema({
   awayScore: { type: Number, default: 0 },
   status: { type: String, enum: ['NOT_STARTED', 'LIVE', 'BREAK', 'FINISHED'], default: 'NOT_STARTED' },
   startTime: { type: Date },
+  finishedAt: { type: Date },
   elapsedMs: { type: Number, default: 0 },
   stats: {
     possession: {
