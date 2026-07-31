@@ -33,6 +33,7 @@ router.post('/', async (req, res) => {
     awayTeam: req.body.awayTeam,
     homeColor: req.body.homeColor,
     awayColor: req.body.awayColor,
+    scheduledDate: req.body.scheduledDate || null,
     lineups: req.body.lineups || { home: [], away: [] }
   });
   try {

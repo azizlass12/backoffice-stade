@@ -18,6 +18,7 @@ const MatchSchema = new mongoose.Schema({
   status: { type: String, enum: ['NOT_STARTED', 'LIVE', 'BREAK', 'FINISHED'], default: 'NOT_STARTED' },
   startTime: { type: Date },
   finishedAt: { type: Date },
+  scheduledDate: { type: Date },
   elapsedMs: { type: Number, default: 0 },
   stats: {
     possession: {
