@@ -4,252 +4,352 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
-const Match = require('./models/Match');
 
 const app = express();
-app.use(cors());
+const PORT = process.env.PORT || 5000;
+
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
+}));
 app.use(express.json());
 
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
     origin: '*',
-    methods: ['GET', 'POST', 'PUT']
+    methods: ['GET', 'POST', 'PUT', 'DELETE']
   }
 });
 
-// Connect to MongoDB
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('MongoDB connected'))
-  .catch(err => console.log('MongoDB connection error:', err));
+// Database Connection with graceful fallback
+const MONGODB_URI = process.env.MONGODB_URI;
+if (MONGODB_URI) {
+  mongoose.connect(MONGODB_URI)
+    .then(() => console.log('✅ Connected to MongoDB Atlas successfully.'))
+    .catch(err => console.log('⚠️ MongoDB connection notice:', err.message));
+} else {
+  console.log('ℹ️ MONGODB_URI not provided; running in in-memory catalog mode.');
+}
 
-// Routes
-const matchRoutes = require('./routes/matchRoutes');
-app.use('/api/matches', matchRoutes);
+// Catalog Data for Spider Tech (Starts clean/empty, populated by your real data/database)
+const productsCatalog = [];
 
-// Socket.io
+// In-Memory Orders
+const orders = [];
+
+// REST API Endpoints
+// Health Check
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ONLINE',
+    app: 'Spider Tech API by Zaydoun',
+    version: '1.0.0',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Products Routes
+app.get('/api/products', (req, res) => {
+  let list = [...productsCatalog];
+  const { category, brand, search, maxPrice } = req.query;
+
+  if (category && category !== 'all') {
+    list = list.filter(p => 
+      p.category.toLowerCase() === category.toLowerCase() ||
+      p.subCategory?.toLowerCase() === category.toLowerCase()
+    );
+  }
+  if (brand) {
+    list = list.filter(p => p.brand.toLowerCase() === brand.toLowerCase());
+  }
+  if (search) {
+    const s = search.toLowerCase();
+    list = list.filter(p => p.title.toLowerCase().includes(s) || p.description.toLowerCase().includes(s));
+  }
+  if (maxPrice) {
+    list = list.filter(p => p.price <= parseFloat(maxPrice));
+  }
+
+  res.json({ success: true, count: list.length, data: list });
+});
+
+app.get('/api/products/:id', (req, res) => {
+  const p = productsCatalog.find(item => item.id === req.params.id);
+  if (!p) {
+    return res.status(404).json({ success: false, error: 'Product not found' });
+  }
+  res.json({ success: true, data: p });
+});
+
+app.post('/api/products', (req, res) => {
+  const { title, price, originalPrice, category, brand, description, stockCount, imageUrl, specs } = req.body;
+  if (!title || price === undefined || price === null) {
+    return res.status(400).json({ success: false, error: 'Title and price are required' });
+  }
+
+  const stock = stockCount !== undefined ? parseInt(stockCount, 10) : 10;
+  const newProduct = {
+    id: 'prod-' + Date.now(),
+    title,
+    price: parseFloat(price),
+    originalPrice: originalPrice ? parseFloat(originalPrice) : parseFloat(price),
+    category: category || 'Laptops',
+    brand: brand || 'Spider Tech',
+    description: description || '',
+    inStock: stock > 0,
+    stockCount: Math.max(0, stock),
+    rating: 5.0,
+    reviewCount: 1,
+    imageUrl: imageUrl || 'https://images.unsplash.com/photo-1587831990711-23ca6441447b?auto=format&fit=crop&w=800&q=80',
+    specs: specs || {}
+  };
+
+  productsCatalog.unshift(newProduct);
+  io.emit('productAdded', newProduct);
+
+  res.status(201).json({ success: true, data: newProduct });
+});
+
+// Update product (Stock / Price / Details)
+app.put('/api/products/:id', (req, res) => {
+  const idx = productsCatalog.findIndex(p => p.id === req.params.id);
+  if (idx === -1) {
+    return res.status(404).json({ success: false, error: 'Product not found' });
+  }
+
+  const existing = productsCatalog[idx];
+  const { title, price, originalPrice, category, brand, description, stockCount, inStock, imageUrl, specs } = req.body;
+
+  if (title !== undefined) existing.title = title;
+  if (price !== undefined) existing.price = parseFloat(price);
+  if (originalPrice !== undefined) existing.originalPrice = parseFloat(originalPrice);
+  if (category !== undefined) existing.category = category;
+  if (brand !== undefined) existing.brand = brand;
+  if (description !== undefined) existing.description = description;
+  if (imageUrl !== undefined) existing.imageUrl = imageUrl;
+  if (specs !== undefined) existing.specs = { ...existing.specs, ...specs };
+
+  if (stockCount !== undefined) {
+    existing.stockCount = Math.max(0, parseInt(stockCount, 10));
+    existing.inStock = existing.stockCount > 0;
+  } else if (inStock !== undefined) {
+    existing.inStock = Boolean(inStock);
+    if (!existing.inStock) existing.stockCount = 0;
+    else if (existing.stockCount === 0) existing.stockCount = 1;
+  }
+
+  io.emit('productUpdated', existing);
+  res.json({ success: true, data: existing });
+});
+
+// Delete product
+app.delete('/api/products/:id', (req, res) => {
+  const idx = productsCatalog.findIndex(p => p.id === req.params.id);
+  if (idx === -1) {
+    return res.status(404).json({ success: false, error: 'Product not found' });
+  }
+
+  const deleted = productsCatalog.splice(idx, 1)[0];
+  io.emit('productDeleted', { id: req.params.id });
+  res.json({ success: true, message: 'Product deleted', data: deleted });
+});
+
+// Auth Routes (Supporting the 3 demo accounts)
+app.post('/api/auth/login', (req, res) => {
+  const { email, password } = req.body;
+
+  const validUsers = [
+    { email: 'admin-demo@example.com', pass: 'DemoAdmin123!', role: 'admin', username: 'demo_admin' },
+    { email: 'seller-demo@example.com', pass: 'DemoSeller123!', role: 'seller', username: 'demo_seller' },
+    { email: 'customer-demo@example.com', pass: 'DemoCustomer123!', role: 'customer', username: 'demo_customer' }
+  ];
+
+  const match = validUsers.find(u => u.email.toLowerCase() === email?.toLowerCase() && u.pass === password);
+
+  if (match) {
+    return res.json({
+      success: true,
+      token: 'jwt-mock-spider-tech-' + Buffer.from(match.email).toString('base64'),
+      user: {
+        id: 'usr-' + match.role,
+        username: match.username,
+        email: match.email,
+        role: match.role
+      }
+    });
+  }
+
+  // Allow test credentials
+  if (email && password && password.length >= 6) {
+    return res.json({
+      success: true,
+      token: 'jwt-mock-spider-tech-dynamic',
+      user: {
+        id: 'usr-' + Date.now(),
+        username: email.split('@')[0],
+        email: email,
+        role: 'customer'
+      }
+    });
+  }
+
+  res.status(401).json({ success: false, error: 'Invalid email or password' });
+});
+
+// Orders Route
+app.post('/api/orders', (req, res) => {
+  const { items, totalAmount, shippingAddress } = req.body;
+  const order = {
+    id: 'ORD-' + Math.floor(100000 + Math.random() * 900000),
+    items: items || [],
+    totalAmount: totalAmount || 0,
+    shippingAddress: shippingAddress || 'Standard Delivery',
+    status: 'Confirmed',
+    createdAt: new Date().toISOString()
+  };
+
+  orders.unshift(order);
+  io.emit('orderCreated', order);
+
+  res.status(201).json({ success: true, data: order });
+});
+
+// =========================================================================
+// Spider Tech ERP & Management System Endpoints
+// =========================================================================
+const erpSales = [];
+const erpRepairs = [];
+const erpClients = [];
+const erpSuppliers = [];
+let erpCashSession = {
+  id: 'cs-init',
+  openedAt: new Date().toISOString(),
+  openedBy: 'Zaydoun Admin',
+  initialCash: 350,
+  currentCash: 350,
+  expectedCash: 350,
+  status: 'open',
+  transactions: []
+};
+
+// ERP Sales
+app.get('/api/erp/sales', (req, res) => {
+  res.json({ success: true, count: erpSales.length, data: erpSales });
+});
+
+app.post('/api/erp/sales', (req, res) => {
+  const sale = {
+    id: 'sale-' + Date.now(),
+    invoiceNumber: req.body.invoiceNumber || 'FAC-' + Date.now(),
+    date: new Date().toISOString(),
+    ...req.body
+  };
+  erpSales.unshift(sale);
+  io.emit('erpSaleCreated', sale);
+  res.status(201).json({ success: true, data: sale });
+});
+
+// ERP Repairs
+app.get('/api/erp/repairs', (req, res) => {
+  res.json({ success: true, count: erpRepairs.length, data: erpRepairs });
+});
+
+app.post('/api/erp/repairs', (req, res) => {
+  const repair = {
+    id: 'rep-' + Date.now(),
+    ticketNumber: req.body.ticketNumber || 'SAV-' + Date.now(),
+    dateReceived: new Date().toISOString(),
+    status: 'received',
+    ...req.body
+  };
+  erpRepairs.unshift(repair);
+  io.emit('erpRepairCreated', repair);
+  res.status(201).json({ success: true, data: repair });
+});
+
+app.put('/api/erp/repairs/:id', (req, res) => {
+  const idx = erpRepairs.findIndex(r => r.id === req.params.id);
+  if (idx !== -1) {
+    erpRepairs[idx] = { ...erpRepairs[idx], ...req.body };
+    io.emit('erpRepairUpdated', erpRepairs[idx]);
+    return res.json({ success: true, data: erpRepairs[idx] });
+  }
+  res.status(404).json({ success: false, error: 'Ticket de réparation non trouvé' });
+});
+
+// ERP Clients
+app.get('/api/erp/clients', (req, res) => {
+  res.json({ success: true, count: erpClients.length, data: erpClients });
+});
+
+app.post('/api/erp/clients', (req, res) => {
+  const client = {
+    id: 'cli-' + Date.now(),
+    createdAt: new Date().toISOString(),
+    ...req.body
+  };
+  erpClients.unshift(client);
+  res.status(201).json({ success: true, data: client });
+});
+
+// ERP Suppliers
+app.get('/api/erp/suppliers', (req, res) => {
+  res.json({ success: true, count: erpSuppliers.length, data: erpSuppliers });
+});
+
+app.post('/api/erp/suppliers', (req, res) => {
+  const supplier = {
+    id: 'sup-' + Date.now(),
+    createdAt: new Date().toISOString(),
+    ...req.body
+  };
+  erpSuppliers.unshift(supplier);
+  res.status(201).json({ success: true, data: supplier });
+});
+
+// ERP Supplier Invoices
+const erpSupplierInvoices = [];
+app.get('/api/erp/invoices', (req, res) => {
+  res.json({ success: true, count: erpSupplierInvoices.length, data: erpSupplierInvoices });
+});
+
+app.post('/api/erp/invoices', (req, res) => {
+  const inv = {
+    id: 'inv-sup-' + Date.now(),
+    createdAt: new Date().toISOString(),
+    ...req.body
+  };
+  erpSupplierInvoices.unshift(inv);
+  res.status(201).json({ success: true, data: inv });
+});
+
+// ERP Cash Session
+app.get('/api/erp/cash', (req, res) => {
+  res.json({ success: true, data: erpCashSession });
+});
+
+app.post('/api/erp/cash/movement', (req, res) => {
+  const tx = {
+    id: 'tx-' + Date.now(),
+    time: new Date().toISOString(),
+    ...req.body
+  };
+  erpCashSession.transactions = [tx, ...(erpCashSession.transactions || [])];
+  if (tx.type === 'in') erpCashSession.currentCash += (Number(tx.amount) || 0);
+  else if (tx.type === 'out') erpCashSession.currentCash -= (Number(tx.amount) || 0);
+  io.emit('erpCashUpdated', erpCashSession);
+  res.json({ success: true, data: erpCashSession });
+});
+
+// Socket.io connection
 io.on('connection', (socket) => {
-  console.log('Client connected:', socket.id);
-
-  socket.on('startMatch', async (matchId) => {
-    console.log('Socket event: startMatch', matchId);
-    try {
-      const match = await Match.findById(matchId);
-      if (match && match.status === 'NOT_STARTED') {
-        match.status = 'LIVE';
-        match.startTime = new Date();
-        match.elapsedMs = 0;
-        await match.save();
-        io.emit('matchUpdated', match);
-      }
-    } catch (err) {
-      console.error(err);
-    }
-  });
-
-  socket.on('pauseMatch', async (matchId) => {
-    console.log('Socket event: pauseMatch', matchId);
-    try {
-      const match = await Match.findById(matchId);
-      if (match && match.status === 'LIVE') {
-        match.status = 'BREAK';
-        const now = new Date();
-        if (match.startTime) {
-          match.elapsedMs += (now.getTime() - new Date(match.startTime).getTime());
-        }
-        match.startTime = null;
-        await match.save();
-        io.emit('matchUpdated', match);
-      }
-    } catch (err) {
-      console.error(err);
-    }
-  });
-
-  socket.on('resumeMatch', async (matchId) => {
-    console.log('Socket event: resumeMatch', matchId);
-    try {
-      const match = await Match.findById(matchId);
-      if (match && match.status === 'BREAK') {
-        match.status = 'LIVE';
-        match.startTime = new Date();
-        await match.save();
-        io.emit('matchUpdated', match);
-      }
-    } catch (err) {
-      console.error(err);
-    }
-  });
-
-  socket.on('addEvent', async ({ matchId, type, player, team, minute, assist }) => {
-    console.log('Socket event: addEvent', { matchId, type, player, team, minute, assist });
-    try {
-      const match = await Match.findById(matchId);
-      if (match && match.status === 'LIVE') {
-        const eventData = { type, player, team, minute };
-        if (assist) eventData.assist = assist;
-        match.events.push(eventData);
-        if (type === 'goal') {
-          if (team === 'home') match.homeScore += 1;
-          if (team === 'away') match.awayScore += 1;
-          
-          if (!match.playerRatings) {
-            match.playerRatings = { home: {}, away: {} };
-          }
-          if (!match.playerRatings[team]) {
-            match.playerRatings[team] = {};
-          }
-          const currentRating = match.playerRatings[team][player] || 0;
-          match.playerRatings[team][player] = currentRating + 1;
-          match.markModified('playerRatings');
-        }
-        await match.save();
-        io.emit('matchUpdated', match);
-      }
-    } catch (err) {
-      console.error(err);
-    }
-  });
-
-  socket.on('updatePlayerRating', async ({ matchId, team, player, change }) => {
-    console.log('Socket event: updatePlayerRating', { matchId, team, player, change });
-    try {
-      const match = await Match.findById(matchId);
-      if (match && match.status === 'LIVE') {
-        if (!match.playerRatings) {
-          match.playerRatings = { home: {}, away: {} };
-        }
-        const currentRating = match.playerRatings[team][player] || 0;
-        match.playerRatings[team][player] = currentRating + change;
-        match.markModified('playerRatings');
-        await match.save();
-        io.emit('matchUpdated', match);
-      }
-    } catch (err) {
-      console.error(err);
-    }
-  });
-
-  socket.on('endMatch', async (matchId) => {
-    console.log('Socket event: endMatch', matchId);
-    try {
-      const match = await Match.findById(matchId);
-      if (match && (match.status === 'LIVE' || match.status === 'BREAK')) {
-        const now = new Date();
-        if (match.status === 'LIVE' && match.startTime) {
-          match.elapsedMs += (now.getTime() - new Date(match.startTime).getTime());
-        }
-        match.status = 'FINISHED';
-        match.finishedAt = now;
-        match.startTime = null;
-
-        // Auto-calculate Man of the Match: score = playerRating + goalCount
-        const allPlayers = [];
-        const lineups = match.lineups || { home: [], away: [] };
-        const ratings = match.playerRatings || { home: {}, away: {} };
-        const events = match.events || [];
-
-        for (const team of ['home', 'away']) {
-          for (const player of (lineups[team] || [])) {
-            const rating = (ratings[team] && ratings[team][player]) ? ratings[team][player] : 0;
-            const goals = events.filter(e => e.type === 'goal' && e.player === player).length;
-            const score = rating + goals;
-            allPlayers.push({ player, score });
-          }
-        }
-
-        if (allPlayers.length > 0) {
-          allPlayers.sort((a, b) => b.score - a.score);
-          // Only set MOTM if the top player has a positive score
-          if (allPlayers[0].score > 0) {
-            match.manOfTheMatch = allPlayers[0].player;
-          }
-        }
-
-        await match.save();
-        io.emit('matchUpdated', match);
-      }
-    } catch (err) {
-      console.error(err);
-    }
-  });
-
-  socket.on('updateStats', async ({ matchId, stats }) => {
-    console.log('Socket event: updateStats', { matchId, stats });
-    try {
-      const match = await Match.findById(matchId);
-      if (match) {
-        match.stats = stats;
-        await match.save();
-        io.emit('matchUpdated', match);
-      }
-    } catch (err) {
-      console.error(err);
-    }
-  });
-
-  socket.on('updateLineups', async ({ matchId, lineups }) => {
-    console.log('Socket event: updateLineups', { matchId, lineups });
-    try {
-      const match = await Match.findById(matchId);
-      if (match) {
-        match.lineups = lineups;
-        await match.save();
-        io.emit('matchUpdated', match);
-      }
-    } catch (err) {
-      console.error(err);
-    }
-  });
-
-  socket.on('setManOfTheMatch', async ({ matchId, player }) => {
-    console.log('Socket event: setManOfTheMatch', { matchId, player });
-    try {
-      const match = await Match.findById(matchId);
-      if (match) {
-        match.manOfTheMatch = player;
-        await match.save();
-        io.emit('matchUpdated', match);
-      }
-    } catch (err) {
-      console.error(err);
-    }
-  });
-
+  console.log('Socket client connected:', socket.id);
   socket.on('disconnect', () => {
-    console.log('Client disconnected:', socket.id);
+    console.log('Socket client disconnected:', socket.id);
   });
 });
 
-// Auto-pause first half at 45 minutes (2,700,000 ms)
-// Second half runs until the admin manually ends the match — no auto-finish
-setInterval(async () => {
-  try {
-    const liveMatches = await Match.find({ status: 'LIVE' });
-    const now = new Date().getTime();
-    for (const match of liveMatches) {
-      if (match.startTime) {
-        const currentElapsed = match.elapsedMs + (now - new Date(match.startTime).getTime());
-        const firstHalfLimit = 45 * 60 * 1000;
-
-        // Auto-pause at 45:00 only if this is the first half (elapsedMs < 45 min)
-        if (match.elapsedMs < firstHalfLimit && currentElapsed >= firstHalfLimit) {
-          match.status = 'BREAK';
-          match.elapsedMs = firstHalfLimit;
-          match.startTime = null;
-          await match.save();
-          io.emit('matchUpdated', match);
-          console.log(`Match ${match._id} automatically paused at Half-Time (45:00).`);
-        }
-        // No auto-finish — second half continues past 90:00 until admin ends it manually
-      }
-    }
-  } catch (err) {
-    console.error('Error in auto-pause checker loop:', err);
-  }
-}, 1000);
-
-const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`🚀 Spider Tech API Server running on port ${PORT}`);
 });
